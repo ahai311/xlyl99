@@ -1,0 +1,10 @@
+node_modules/
+android/
+ios/
+.DS_Store
+*.log
+release.p12
+local.properties
+.idea/
+*.iml
+.capacitor/
