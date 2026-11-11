@@ -128,6 +128,13 @@ jobs:
           npx cap sync ios
           test -d ios/App
 
+      - name: Apply iOS icon & splash
+        env:
+          SPLASH_ENABLED: ${{ inputs.splash_enabled }}
+        run: |
+          python3 -m pip install --quiet --break-system-packages Pillow 2>/dev/null || python3 -m pip install --quiet Pillow
+          python3 scripts/apply-ios-assets.py
+
       - name: Verify iOS shell
         env:
           TARGET_URL: ${{ inputs.target_url }}
