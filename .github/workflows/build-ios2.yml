@@ -1,0 +1,197 @@
+# 纯 WebView 壳 iOS 未签名 IPA（macOS runner + Capacitor 7）
+name: Build iOS
+run-name: app-builder:${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: U-Station build record id
+        required: false
+      target_url:
+        description: H5 target URL
+        required: true
+      bundle_id:
+        description: iOS bundle identifier
+        required: true
+      app_name:
+        description: App display name (ASCII fallback)
+        required: true
+      app_name_b64:
+        description: UTF-8 display name base64
+        required: false
+      version_name:
+        description: CFBundleShortVersionString
+        required: true
+      version_code:
+        description: CFBundleVersion
+        required: true
+      platform_url:
+        description: U-Station API base (assets)
+        required: true
+      icon_url:
+        description: optional icon path/url
+        required: false
+      splash_url:
+        description: optional splash path/url
+        required: false
+      square_icon_url:
+        description: optional square icon
+        required: false
+      callback_token:
+        description: platform callback token
+        required: true
+      splash_enabled:
+        description: Show the startup splash image
+        required: false
+        default: "true"
+      min_sdk:
+        required: false
+        default: "24"
+      target_sdk:
+        required: false
+        default: "36"
+      compile_sdk:
+        required: false
+        default: "36"
+      fix_apk:
+        required: false
+        default: "true"
+      sign_v1:
+        required: false
+        default: "true"
+      sign_v2:
+        required: false
+        default: "true"
+      sign_v3:
+        required: false
+        default: "true"
+      verify_apk:
+        required: false
+        default: "true"
+      check_production:
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      SPLASH_ENABLED: ${{ inputs.splash_enabled }}
+      APP_BUILDER_MIN_SDK: ${{ inputs.min_sdk }}
+      APP_BUILDER_TARGET_SDK: ${{ inputs.target_sdk }}
+      APP_BUILDER_COMPILE_SDK: ${{ inputs.compile_sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          node scripts/ensure-www.mjs
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Apply build config & assets
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          APP_NAME: ${{ inputs.app_name }}
+          APP_NAME_B64: ${{ inputs.app_name_b64 }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          PLATFORM_URL: ${{ inputs.platform_url }}
+          ICON_URL: ${{ inputs.icon_url }}
+          SPLASH_URL: ${{ inputs.splash_url }}
+          SQUARE_ICON_URL: ${{ inputs.square_icon_url }}
+        run: |
+          node scripts/apply-build-config.mjs
+          node scripts/ensure-bundled-assets.mjs
+          node scripts/download-assets.mjs || true
+
+      - name: Capacitor add iOS
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          APP_NAME: ${{ inputs.app_name }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          npm ls @capacitor/ios >/dev/null 2>&1 || npm install @capacitor/core@7.2.0 @capacitor/ios@7.2.0 --no-save
+          rm -rf ios
+          npx cap add ios
+          npx cap sync ios
+          test -d ios/App
+
+      - name: Verify iOS shell
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+        run: node scripts/verify-ios-build.mjs
+
+      - name: Build unsigned IPA
+        env:
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: bash ios-build.sh
+
+      - name: Verify IPA artifact
+        run: |
+          test -f app-ios.ipa
+          ls -la app-ios.ipa
+          unzip -l app-ios.ipa | head -20
+
+      - name: Collect IPA
+        id: ipa
+        run: |
+          test -f app-ios.ipa
+          echo "path=app-ios.ipa" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename app-ios.ipa)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -f%z app-ios.ipa)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-v${{ inputs.version_name }}-${{ github.run_number }}
+          name: iOS v${{ inputs.version_name }} (${{ github.run_number }})
+          files: ${{ steps.ipa.outputs.path }}
+          generate_release_notes: false
+
+      - name: Upload IPA to platform (public download)
+        if: success() && inputs.callback_token != ''
+        env:
+          PLATFORM_URL: ${{ inputs.platform_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          BUILD_ID: ${{ inputs.build_id }}
+          BUILD_PLATFORM: ios
+          VERSION_NAME: ${{ inputs.version_name }}
+          RELEASE_TAG: ios-v${{ inputs.version_name }}-${{ github.run_number }}
+          APK_PATH: ${{ steps.ipa.outputs.path }}
+        run: node scripts/upload-apk-to-platform.mjs || echo "platform upload failed (non-fatal, use GitHub Release)"
+
+      - name: Notify platform (success)
+        if: success()
+        env:
+          PLATFORM_URL: ${{ inputs.platform_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          BUILD_ID: ${{ inputs.build_id }}
+          BUILD_PLATFORM: ios
+          BUILD_STATUS: success
+          RELEASE_TAG: ios-v${{ inputs.version_name }}-${{ github.run_number }}
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/ios-v${{ inputs.version_name }}-${{ github.run_number }}/${{ steps.ipa.outputs.name }}
+          FILE_SIZE_BYTES: ${{ steps.ipa.outputs.size }}
+        run: node scripts/notify-platform.mjs || true
+
+      - name: Notify platform (failure)
+        if: failure()
+        env:
+          PLATFORM_URL: ${{ inputs.platform_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          BUILD_ID: ${{ inputs.build_id }}
+          BUILD_PLATFORM: ios
+          BUILD_STATUS: failed
+          BUILD_ERROR: iOS workflow failed
+        run: node scripts/notify-platform.mjs || true
